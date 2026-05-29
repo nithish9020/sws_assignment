@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import { env } from "./env.js";
 import { uploadRouter } from "./routes/upload.js";
+import { documentsRouter } from "./routes/documents.js";
 
 const app = express();
 
@@ -16,6 +17,7 @@ app.get("/health", (req, res) => {
 
 // API Routes
 app.use("/api/upload", uploadRouter);
+app.use("/api/documents", documentsRouter);
 
 // Global Error Handler
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
