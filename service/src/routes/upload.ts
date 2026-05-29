@@ -5,15 +5,21 @@ import fs from "fs";
 import { eq } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { storage } from "../storage/index.js";
-import { ACCEPTED_MIME_TYPES } from "@docmanager/shared";
+import { ACCEPTED_MIME_TYPES, BULK_UPLOAD_THRESHOLD, UploadRecord, NotificationType } from "@docmanager/shared";
+import { broadcastEvent } from "../ws/hub.js";
 
 export const uploadRouter: Router = Router();
 
-// We use disk storage to handle large files (e.g., 1GB PDFs) without crashing the server's RAM.
+function toUploadRecord(dbRecord: typeof schema.uploads.$inferSelect): UploadRecord {
+  return {
+    ...dbRecord,
+    createdAt: dbRecord.createdAt.toISOString(),
+  };
+}
+
 const upload = multer({
   dest: os.tmpdir(),
   limits: {
-    // 50 MB limit by default for safety, but can be raised to 1GB if needed
     fileSize: 50 * 1024 * 1024,
   },
   fileFilter: (req, file, cb) => {
@@ -24,86 +30,146 @@ const upload = multer({
   },
 });
 
-uploadRouter.post("/", upload.single("file"), async (req, res, next) => {
+async function processSingleFile(file: Express.Multer.File, uploadRecord: UploadRecord) {
   try {
-    const file = req.file;
+    const storedObject = await storage.upload({
+      filepath: file.path,
+      filename: file.originalname,
+      mimeType: file.mimetype,
+    });
 
-    if (!file) {
-      res.status(400).json({ error: "No file provided" });
-      return;
-    }
+    await fs.promises.unlink(file.path);
 
-    // 1. Initial insert into uploads (processing)
-    const [uploadRecord] = await db
-      .insert(schema.uploads)
+    const [document] = await db
+      .insert(schema.documents)
       .values({
         name: file.originalname,
         size: file.size,
-        status: "processing",
+        mimeType: file.mimetype,
+        url: storedObject.url,
+        storageKey: storedObject.key,
       })
       .returning();
 
-    // The response is sent after the upload completes for a single file since we aren't doing the bulk upload WS push yet.
+    if (!document) throw new Error("Failed to insert document record");
+
+    const [completedUpload] = await db
+      .update(schema.uploads)
+      .set({
+        status: "complete",
+        documentId: document.id,
+      })
+      .where(eq(schema.uploads.id, uploadRecord.id))
+      .returning();
+
+    broadcastEvent({ event: "upload_status", data: toUploadRecord(completedUpload!) });
+    return toUploadRecord(completedUpload!);
+  } catch (err: any) {
+    const [failedUpload] = await db
+      .update(schema.uploads)
+      .set({
+        status: "failed",
+        error: err.message,
+      })
+      .where(eq(schema.uploads.id, uploadRecord.id))
+      .returning();
+
+    broadcastEvent({ event: "upload_status", data: toUploadRecord(failedUpload!) });
+
     try {
-      // 2. Upload to storage (Cloudinary)
-      const storedObject = await storage.upload({
-        filepath: file.path,
-        filename: file.originalname,
-        mimeType: file.mimetype,
+      await fs.promises.unlink(file.path);
+    } catch (e) {
+      // Ignore unlink errors
+    }
+
+    return toUploadRecord(failedUpload!);
+  }
+}
+
+uploadRouter.post("/", upload.array("file", 20), async (req, res, next) => {
+  try {
+    const files = req.files as Express.Multer.File[];
+
+    if (!files || files.length === 0) {
+      res.status(400).json({ error: "No files provided" });
+      return;
+    }
+
+    const isBackground = files.length > BULK_UPLOAD_THRESHOLD;
+
+    // 1. Initial insert into uploads (processing) for all files
+    const uploadRecords = await db.transaction(async (tx) => {
+      const records: UploadRecord[] = [];
+      for (const file of files) {
+        const [record] = await tx
+          .insert(schema.uploads)
+          .values({
+            name: file.originalname,
+            size: file.size,
+            status: "processing",
+          })
+          .returning();
+        records.push(toUploadRecord(record!));
+      }
+      return records;
+    });
+
+    if (isBackground) {
+      // Respond immediately
+      res.status(200).json({
+        uploads: uploadRecords,
+        background: true,
       });
 
-      // 3. Clean up the temporary file from disk
-      await fs.promises.unlink(file.path);
+      // Process in background
+      (async () => {
+        let successCount = 0;
+        let failCount = 0;
 
-      // 4. Insert into documents table
-      const [document] = await db
-        .insert(schema.documents)
-        .values({
-          name: file.originalname,
-          size: file.size,
-          mimeType: file.mimetype,
-          url: storedObject.url,
-          storageKey: storedObject.key,
-        })
-        .returning();
+        for (let i = 0; i < files.length; i++) {
+          const result = await processSingleFile(files[i]!, uploadRecords[i]!);
+          if (result.status === "complete") successCount++;
+          else failCount++;
+        }
 
-      if (!document) throw new Error("Failed to insert document record");
+        // Send a bulk notification
+        const [notification] = await db
+          .insert(schema.notifications)
+          .values({
+            type: "bulk_upload_complete",
+            message: `Bulk upload finished. ${successCount} successful, ${failCount} failed.`,
+          })
+          .returning();
+          
+        broadcastEvent({ 
+          event: "notification", 
+          data: { ...notification!, createdAt: notification!.createdAt.toISOString() } 
+        });
+      })();
+    } else {
+      // Process sequentially and respond when done
+      const completedRecords: UploadRecord[] = [];
+      for (let i = 0; i < files.length; i++) {
+        const record = await processSingleFile(files[i]!, uploadRecords[i]!);
+        completedRecords.push(record);
+      }
 
-      // 5. Update uploads table to complete
-      const [completedUpload] = await db
-        .update(schema.uploads)
-        .set({
-          status: "complete",
-          documentId: document.id,
-        })
-        .where(eq(schema.uploads.id, uploadRecord!.id))
-        .returning();
-
-      // For single uploads, we just return the completed upload record
       res.status(200).json({
-        uploads: [completedUpload],
+        uploads: completedRecords,
         background: false,
       });
-    } catch (err: any) {
-      // On failure, update uploads table to failed
-      if (uploadRecord) {
-        await db
-          .update(schema.uploads)
-          .set({
-            status: "failed",
-            error: err.message,
-          })
-          .where(eq(schema.uploads.id, uploadRecord.id));
+      
+      // Optionally create a notification for single files if needed
+      if (files.length === 1 && completedRecords[0]?.status === "complete") {
+        const [notification] = await db.insert(schema.notifications).values({
+          type: "upload_complete",
+          message: `Successfully uploaded ${files[0]?.originalname}`,
+        }).returning();
+        broadcastEvent({ 
+          event: "notification", 
+          data: { ...notification!, createdAt: notification!.createdAt.toISOString() } 
+        });
       }
-
-      // Attempt cleanup
-      try {
-        await fs.promises.unlink(file.path);
-      } catch (e) {
-        // Ignore unlink errors
-      }
-
-      res.status(500).json({ error: "File processing failed", details: err.message });
     }
   } catch (error) {
     next(error);

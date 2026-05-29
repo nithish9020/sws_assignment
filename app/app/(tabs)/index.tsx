@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import {
   View,
   StyleSheet,
@@ -27,12 +27,14 @@ import {
   deleteDocument,
   type DocumentItem,
 } from "../../src/api/documents";
+import { wsClient } from "../../src/api/ws";
+import { BULK_UPLOAD_THRESHOLD } from "@docmanager/shared";
 
 type UploadItem = {
   id: string;
   name: string;
   size: number;
-  status: "queued" | "uploading" | "complete" | "failed";
+  status: "queued" | "uploading" | "processing" | "complete" | "failed";
   progress: number;
   error?: string;
 };
@@ -43,6 +45,7 @@ export default function UploadScreen() {
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [backgroundMode, setBackgroundMode] = useState(false);
 
   const loadDocuments = useCallback(async () => {
     try {
@@ -59,67 +62,144 @@ export default function UploadScreen() {
     }, [loadDocuments])
   );
 
+  useEffect(() => {
+    // Connect to WebSocket and subscribe to events
+    wsClient.connect();
+    
+    const unsubscribe = wsClient.subscribe((event) => {
+      if (event.event === "upload_status") {
+        const data = event.data;
+        // Update the uploads list with the new status
+        setUploads((prev) => {
+          const exists = prev.find((u) => u.id === data.id);
+          if (exists) {
+            return prev.map((u) =>
+              u.id === data.id
+                ? {
+                    ...u,
+                    status: data.status,
+                    error: data.error || undefined,
+                    progress: data.status === "complete" ? 100 : u.progress,
+                  }
+                : u
+            );
+          } else {
+            // Add background upload if not in local state
+            return [
+              {
+                id: data.id,
+                name: data.name,
+                size: data.size,
+                status: data.status,
+                progress: data.status === "complete" ? 100 : 0,
+                error: data.error || undefined,
+              },
+              ...prev,
+            ];
+          }
+        });
+
+        // If completed, refresh the document library
+        if (data.status === "complete") {
+          loadDocuments();
+        }
+      } else if (event.event === "notification") {
+        if (event.data.type === "bulk_upload_complete") {
+          setBackgroundMode(false);
+          loadDocuments();
+        }
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [loadDocuments]);
+
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     await loadDocuments();
     setRefreshing(false);
   }, [loadDocuments]);
 
-  const pickAndUpload = async () => {
+  const pickAndUpload = async (multiple = false) => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
         type: "application/pdf",
-        multiple: false,
+        multiple: true,
         copyToCacheDirectory: true,
       });
 
       if (result.canceled || !result.assets?.length) return;
+      
+      let assets = result.assets;
+      if (!multiple && assets.length > 1) {
+        assets = [assets[0]];
+      }
 
-      const file = result.assets[0];
-      const uploadId = Date.now().toString();
+      if (assets.length > BULK_UPLOAD_THRESHOLD) {
+        setBackgroundMode(true);
+      }
 
-      const newUpload: UploadItem = {
-        id: uploadId,
-        name: file.name,
-        size: file.size ?? 0,
-        status: "uploading",
-        progress: 0,
-      };
+      for (const file of assets) {
+        const tempId = Date.now().toString() + Math.random().toString();
+        const newUpload: UploadItem = {
+          id: tempId,
+          name: file.name,
+          size: file.size ?? 0,
+          status: "uploading",
+          progress: 0,
+        };
 
-      setUploads((prev) => [newUpload, ...prev]);
+        setUploads((prev) => [newUpload, ...prev]);
 
-      try {
-        await uploadFile(
-          file.uri,
-          file.name,
-          file.mimeType ?? "application/pdf",
-          (percent) => {
+        try {
+          const res = await uploadFile(
+            file.uri,
+            file.name,
+            file.mimeType ?? "application/pdf",
+            (percent) => {
+              setUploads((prev) =>
+                prev.map((u) =>
+                  u.id === tempId ? { ...u, progress: percent } : u
+                )
+              );
+            }
+          );
+          
+          if (res.background) {
+             // Let websocket handle updates
+             setBackgroundMode(true);
+          }
+
+          if (res.uploads && res.uploads.length > 0) {
+            const uploadedRecord = res.uploads[0];
+            // Replace temporary ID with real database ID
             setUploads((prev) =>
               prev.map((u) =>
-                u.id === uploadId ? { ...u, progress: percent } : u
+                u.id === tempId
+                  ? {
+                      ...u,
+                      id: uploadedRecord.id,
+                      status: uploadedRecord.status,
+                      progress: uploadedRecord.status === "complete" ? 100 : u.progress,
+                      error: uploadedRecord.error || undefined,
+                    }
+                  : u
               )
             );
           }
-        );
 
-        setUploads((prev) =>
-          prev.map((u) =>
-            u.id === uploadId
-              ? { ...u, status: "complete", progress: 100 }
-              : u
-          )
-        );
-
-        // Refresh documents list
-        await loadDocuments();
-      } catch (err: any) {
-        setUploads((prev) =>
-          prev.map((u) =>
-            u.id === uploadId
-              ? { ...u, status: "failed", error: err.message }
-              : u
-          )
-        );
+          await loadDocuments();
+        } catch (err: any) {
+          setUploads((prev) =>
+            prev.map((u) =>
+              u.id === tempId
+                ? { ...u, status: "failed", error: err.message }
+                : u
+            )
+          );
+        }
       }
     } catch {
       Alert.alert("Error", "Failed to pick file");
@@ -163,19 +243,6 @@ export default function UploadScreen() {
     });
   };
 
-  const statusColor = (status: UploadItem["status"]) => {
-    switch (status) {
-      case "uploading":
-        return colors.primary;
-      case "complete":
-        return "#22C55E";
-      case "failed":
-        return "#EF4444";
-      default:
-        return "#9AABBA";
-    }
-  };
-
   return (
     <ScrollView
       style={[styles.container, { backgroundColor: colors.background }]}
@@ -184,6 +251,19 @@ export default function UploadScreen() {
         <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
       }
     >
+      {/* Background Upload Banner */}
+      {backgroundMode && (
+        <Card style={styles.bannerCard} mode="outlined">
+          <Card.Content style={styles.bannerContent}>
+            <MaterialCommunityIcons name="cloud-upload" size={24} color={colors.primary} />
+            <View style={{ marginLeft: 12, flex: 1 }}>
+              <Text variant="bodyMedium" style={{ fontWeight: "bold" }}>Uploading files in background</Text>
+              <Text variant="bodySmall" style={{ color: "#6B7B8D" }}>You'll receive a notification when finished.</Text>
+            </View>
+          </Card.Content>
+        </Card>
+      )}
+
       {/* Upload Drop Zone */}
       <Card style={styles.dropZone} mode="outlined">
         <Card.Content style={styles.dropZoneContent}>
@@ -195,23 +275,38 @@ export default function UploadScreen() {
             />
           </View>
           <Text variant="titleMedium" style={styles.dropTitle}>
-            Tap to browse & upload
+            Drop files here or click to browse
           </Text>
           <Text
             variant="bodySmall"
             style={{ color: "#6B7B8D", marginTop: 4 }}
           >
-            PDF files only · Up to 50 MB per file
+            Any file type · Up to 50 MB per file
           </Text>
 
+          <View style={{ flexDirection: "row", marginTop: 20, gap: 12 }}>
+            <Button
+              mode="contained-tonal"
+              onPress={() => pickAndUpload(false)}
+              labelStyle={{ fontWeight: "600" }}
+            >
+              Single file
+            </Button>
+            <Button
+              mode="contained-tonal"
+              onPress={() => pickAndUpload(true)}
+              labelStyle={{ fontWeight: "600" }}
+            >
+              Bulk upload
+            </Button>
+          </View>
           <Button
-            mode="contained"
-            icon="upload"
-            onPress={pickAndUpload}
-            style={styles.uploadButton}
-            labelStyle={{ fontWeight: "600" }}
+            mode="text"
+            style={{ marginTop: 12 }}
+            labelStyle={{ fontWeight: "600", fontSize: 13 }}
+            onPress={() => pickAndUpload(true)}
           >
-            Select PDF
+            Try 4+ files to trigger notifications
           </Button>
         </Card.Content>
       </Card>
@@ -222,7 +317,7 @@ export default function UploadScreen() {
           <Text variant="titleSmall" style={styles.sectionTitle}>
             Upload Queue
           </Text>
-          {uploads.map((item) => (
+          {uploads.slice(0, 5).map((item) => (
             <Card key={item.id} style={styles.uploadCard} mode="elevated">
               <Card.Content>
                 <View style={styles.uploadRow}>
@@ -258,18 +353,19 @@ export default function UploadScreen() {
                     {item.status}
                   </Chip>
                 </View>
-                {item.status === "uploading" && (
+                {(item.status === "uploading" || item.status === "processing") && (
                   <View style={styles.progressSection}>
                     <ProgressBar
                       progress={item.progress / 100}
                       color={colors.primary}
                       style={styles.progressBar}
+                      indeterminate={item.status === "processing"}
                     />
                     <Text
                       variant="labelSmall"
                       style={{ color: "#6B7B8D", marginTop: 4 }}
                     >
-                      {item.progress}%
+                      {item.status === "processing" ? "Processing on server..." : `${item.progress}%`}
                     </Text>
                   </View>
                 )}
@@ -382,6 +478,15 @@ const styles = StyleSheet.create({
     padding: 16,
     paddingBottom: 32,
   },
+  bannerCard: {
+    backgroundColor: "#F0F6FF",
+    borderColor: "#D0E3FF",
+    marginBottom: 16,
+  },
+  bannerContent: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
   dropZone: {
     borderStyle: "dashed",
     borderWidth: 2,
@@ -404,11 +509,6 @@ const styles = StyleSheet.create({
   dropTitle: {
     fontWeight: "700",
     marginTop: 4,
-  },
-  uploadButton: {
-    marginTop: 20,
-    borderRadius: 24,
-    paddingHorizontal: 8,
   },
   section: {
     marginTop: 24,

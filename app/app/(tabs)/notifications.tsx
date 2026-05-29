@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import {
   View,
   StyleSheet,
@@ -14,9 +14,14 @@ import {
 } from "react-native-paper";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFocusEffect } from "expo-router";
+import {
+  fetchNotifications,
+  markAllNotificationsAsRead,
+  markNotificationAsRead,
+} from "../../src/api/notifications";
+import { wsClient } from "../../src/api/ws";
 
-// Placeholder: will be connected to backend notifications API in Phase 3
-type NotificationItem = {
+export type NotificationItem = {
   id: string;
   type: string;
   message: string;
@@ -27,12 +32,18 @@ type NotificationItem = {
 export default function NotificationsScreen() {
   const { colors } = useTheme();
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   const loadNotifications = useCallback(async () => {
-    // Phase 3: will call GET /api/notifications
-    setLoading(false);
+    try {
+      const data = await fetchNotifications();
+      setNotifications(data);
+    } catch (error) {
+      console.error("Failed to fetch notifications:", error);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useFocusEffect(
@@ -41,11 +52,46 @@ export default function NotificationsScreen() {
     }, [loadNotifications])
   );
 
+  useEffect(() => {
+    // Listen for real-time notifications
+    const unsubscribe = wsClient.subscribe((event) => {
+      if (event.event === "notification") {
+        const notif = event.data as NotificationItem;
+        setNotifications((prev) => [notif, ...prev]);
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     await loadNotifications();
     setRefreshing(false);
   }, [loadNotifications]);
+
+  const handleMarkAllRead = async () => {
+    try {
+      await markAllNotificationsAsRead();
+      setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    } catch (error) {
+      console.error("Failed to mark all read:", error);
+    }
+  };
+
+  const handlePressNotification = async (item: NotificationItem) => {
+    if (item.read) return;
+    try {
+      await markNotificationAsRead(item.id);
+      setNotifications((prev) =>
+        prev.map((n) => (n.id === item.id ? { ...n, read: true } : n))
+      );
+    } catch (error) {
+      console.error("Failed to mark as read:", error);
+    }
+  };
 
   const formatRelativeTime = (dateStr: string) => {
     const now = new Date();
@@ -92,6 +138,7 @@ export default function NotificationsScreen() {
         !item.read && { borderLeftWidth: 3, borderLeftColor: colors.primary },
       ]}
       mode="elevated"
+      onPress={() => handlePressNotification(item)}
     >
       <Card.Content style={styles.notifContent}>
         <View
@@ -144,9 +191,7 @@ export default function NotificationsScreen() {
           <Button
             mode="text"
             compact
-            onPress={() => {
-              // Phase 3: PATCH /api/notifications/read-all
-            }}
+            onPress={handleMarkAllRead}
             textColor={colors.primary}
           >
             Mark all read

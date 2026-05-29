@@ -5,7 +5,7 @@ export interface UploadResult {
     id: string;
     name: string;
     size: number;
-    status: string;
+    status: "queued" | "uploading" | "processing" | "complete" | "failed";
     documentId: string | null;
     error: string | null;
     createdAt: string;

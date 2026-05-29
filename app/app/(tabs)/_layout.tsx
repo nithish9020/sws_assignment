@@ -1,9 +1,31 @@
 import { Tabs } from "expo-router";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useTheme } from "react-native-paper";
+import { useState, useEffect } from "react";
+import { fetchUnreadCount } from "../../src/api/notifications";
+import { wsClient } from "../../src/api/ws";
 
 export default function TabsLayout() {
   const { colors } = useTheme();
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  useEffect(() => {
+    // Initial fetch
+    fetchUnreadCount()
+      .then(setUnreadCount)
+      .catch(console.error);
+
+    // Subscribe to new notifications
+    const unsubscribe = wsClient.subscribe((event) => {
+      if (event.event === "notification") {
+        setUnreadCount((prev) => prev + 1);
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, []);
 
   return (
     <Tabs
@@ -56,6 +78,7 @@ export default function TabsLayout() {
         options={{
           title: "Notifications",
           tabBarLabel: "Alerts",
+          tabBarBadge: unreadCount > 0 ? unreadCount : undefined,
           tabBarIcon: ({ color, size }) => (
             <MaterialCommunityIcons name="bell-outline" color={color} size={size} />
           ),
