@@ -1,0 +1,21 @@
+{
+  "name": "docmanager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Document Management Mobile App — Expo (app) + Bun/Express (service) + shared Zod contracts",
+  "workspaces": [
+    "shared",
+    "service",
+    "app"
+  ],
+  "scripts": {
+    "dev:service": "bun run --cwd service dev",
+    "dev:app": "bun run --cwd app start",
+    "build:shared": "bun run --cwd shared build",
+    "typecheck": "bun run --cwd shared typecheck && bun run --cwd service typecheck"
+  },
+  "engines": {
+    "bun": ">=1.3.0",
+    "node": ">=20"
+  }
+}
