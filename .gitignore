@@ -22,9 +22,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Bun
-bun.lock
-# (keep bun.lock if you prefer reproducible installs — remove the line above to commit it)
+# Bun (bun.lock committed for reproducible installs)
 
 # Drizzle generated SQL (keep migrations, ignore meta journal noise if desired)
 # service/drizzle/
