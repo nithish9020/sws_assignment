@@ -10,12 +10,18 @@ export default function TabsLayout() {
   const [unreadCount, setUnreadCount] = useState(0);
 
   useEffect(() => {
-    // Initial fetch
-    fetchUnreadCount()
-      .then(setUnreadCount)
-      .catch(console.error);
+    // Fetch unread count and keep it in sync
+    const refreshCount = () => {
+      fetchUnreadCount().then(setUnreadCount).catch(console.error);
+    };
 
-    // Subscribe to new notifications
+    // Initial fetch
+    refreshCount();
+
+    // Poll every 5s to stay in sync (e.g. after mark-all-read)
+    const interval = setInterval(refreshCount, 5000);
+
+    // Also bump immediately on new WS notifications
     const unsubscribe = wsClient.subscribe((event) => {
       if (event.event === "notification") {
         setUnreadCount((prev) => prev + 1);
@@ -23,6 +29,7 @@ export default function TabsLayout() {
     });
 
     return () => {
+      clearInterval(interval);
       unsubscribe();
     };
   }, []);

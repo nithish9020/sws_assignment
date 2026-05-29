@@ -70,34 +70,18 @@ export default function UploadScreen() {
       if (event.event === "upload_status") {
         const data = event.data;
         // Update the uploads list with the new status
-        setUploads((prev) => {
-          const exists = prev.find((u) => u.id === data.id);
-          if (exists) {
-            return prev.map((u) =>
-              u.id === data.id
-                ? {
-                    ...u,
-                    status: data.status,
-                    error: data.error || undefined,
-                    progress: data.status === "complete" ? 100 : u.progress,
-                  }
-                : u
-            );
-          } else {
-            // Add background upload if not in local state
-            return [
-              {
-                id: data.id,
-                name: data.name,
-                size: data.size,
-                status: data.status,
-                progress: data.status === "complete" ? 100 : 0,
-                error: data.error || undefined,
-              },
-              ...prev,
-            ];
-          }
-        });
+        setUploads((prev) =>
+          prev.map((u) =>
+            u.id === data.id
+              ? {
+                  ...u,
+                  status: data.status,
+                  error: data.error || undefined,
+                  progress: data.status === "complete" ? 100 : u.progress,
+                }
+              : u
+          )
+        );
 
         // If completed, refresh the document library
         if (data.status === "complete") {
