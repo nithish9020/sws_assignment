@@ -12,7 +12,7 @@ export interface StoredObject {
 export interface StorageAdapter {
   /** Persist a file buffer and return its public URL + deletion key. */
   upload(input: {
-    buffer: Buffer;
+    filepath: string;
     filename: string;
     mimeType: string;
   }): Promise<StoredObject>;

@@ -22,9 +22,10 @@ export function createCloudinaryAdapter(): StorageAdapter {
   });
 
   return {
-    upload({ buffer, filename }) {
+    upload({ filepath, filename }) {
       return new Promise<StoredObject>((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
+        cloudinary.uploader.upload(
+          filepath,
           {
             resource_type: "raw",
             folder: env.CLOUDINARY_FOLDER,
@@ -37,7 +38,6 @@ export function createCloudinaryAdapter(): StorageAdapter {
             resolve({ url: result.secure_url, key: result.public_id });
           },
         );
-        stream.end(buffer);
       });
     },
 
